@@ -4,7 +4,7 @@ import os
 import sys
 import threading
 import tkinter as Tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 def InjectSysPath():
     base = os.path.dirname(os.path.abspath(__file__))
@@ -27,11 +27,27 @@ def NeedsPassword(msg: str) -> bool:
     keys = ["password", "login", "logged out", "not yet logged in", "p4 login is required", "ticket", "perforce password"]
     return any(k in s for k in keys)
 
+def _choose_theme():
+    """优先使用带“✔”对勾的原生 Windows 主题，其次退回 clam。"""
+    st = ttk.Style()
+    names = set(st.theme_names())
+    for cand in ("vista", "xpnative", "winnative", "clam"):
+        if cand in names:
+            try:
+                st.theme_use(cand)
+                return cand
+            except Exception:
+                continue
+    return st.theme_use()
+
 def Main():
     ctx = {"P4": None}
 
     root = Tk.Tk()
     root.title("P4 SubmitList Tool")
+
+    # —— 选择主题：尽量让 ttk.Checkbutton 显示“✔”而不是“X”
+    current_theme = _choose_theme()
 
     # === 窗口居中 ===
     root.update_idletasks()
@@ -45,7 +61,7 @@ def Main():
     # === 居中结束 ===
 
     current = {"frame": None}
-    # 记录当前选中的 changelist id（用于一致性检测时过滤 opened）
+    # 记录当前选中的 changelist（用于一致性检测过滤 opened）
     state = {"current_cl": "default"}
 
     def ui(fn, *a, **kw):
@@ -164,7 +180,7 @@ def Main():
 
         # === 一致性检测工具 ===
         def _opened_paths_in_current_cl():
-            """返回当前 CL 下的已打开 depot 路径列表（字符串精确值）"""
+            """返回当前 CL 下的已打开 depot 路径列表"""
             ok2, p2, _t2, _ = GetOpenedPairs(ctx["P4"], state["current_cl"])
             if not ok2:
                 return []
@@ -202,11 +218,9 @@ def Main():
                     step_msg = f"{src} → {dst}"
 
                     # ---------- 方法1：单步移动 ----------
-                    moved = False
                     if TrySingleMove(ctx["P4"], src, dst):
                         # 执行后立刻做一致性检测（必须完全相等）
                         if _is_exact_match(dst):
-                            moved = True
                             ok_count += 1
                             logs.append(f"[OK] move {src} -> {dst}")
                             ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
@@ -222,7 +236,6 @@ def Main():
                                 continue
                             # 用实际路径执行方法2
                             if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
-                                moved = True
                                 ok_count += 1
                                 logs.append(f"[OK] move*2(fix-after-1st) {current_path} -> {dst}")
                                 ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
@@ -234,11 +247,8 @@ def Main():
                                 continue
 
                     # ---------- 方法2：双步移动（直接尝试） ----------
-                    # 方法1未成功执行（或直接失败），尝试方法2从“当前实际路径”出发更稳妥：
-                    # 若前面未移动过，则 current_path 仍应等于 src；若移动过失败就按大小写不敏感去找。
                     current_path = _find_casefold_match(dst) or src
                     if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
-                        moved = True
                         ok_count += 1
                         logs.append(f"[OK] move*2 {current_path} -> {dst}")
                     else:

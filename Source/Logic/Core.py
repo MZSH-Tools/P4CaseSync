@@ -1,4 +1,3 @@
-# Core.py
 # -*- coding: utf-8 -*-
 
 import os, re, json, subprocess
@@ -107,33 +106,48 @@ def GetPendingChangelists(ctx: P4Context, Max: int = 50) -> List[Tuple[str, str]
 
 # ===================== 名称规范化 & Opened 列表 =====================
 def NormalizeName(name: str) -> str:
+    # 你可以在这里扩展大小写/非法字符处理规则；当前仅 strip
     return (name or "").strip()
 
-def _parse_opened_lines(text: str) -> List[str]:
+def _parse_opened_lines(text: str):
+    """
+    解析 p4 opened 输出。
+    返回: [(depot_path, action), ...]
+      例行: //depot/Path/File.uasset#3 - edit default change (text)
+    """
     out = []
     for line in (text or "").splitlines():
-        m = re.match(r"^(//.+?)(?:#\d+)?\s+-\s+\w+\b", line.strip())
+        s = line.strip()
+        m = re.match(r"^(//.+?)(?:#\d+)?\s+-\s+([a-zA-Z/]+)\b", s)
         if m:
-            out.append(m.group(1))
+            depot = m.group(1)
+            action = (m.group(2) or "").lower()
+            out.append((depot, action))
     return out
 
 def GetOpenedPairs(ctx: P4Context, changelist: str) -> Tuple[bool, List[Tuple[str,str]], List[str], str]:
     """
     ok, pairs, targets, msg
     - changelist 可为 "" / "default" / "12345"
+    - 仅返回 {edit, add, move/add}，过滤 delete/move/delete 等
+    - 目标路径（“更改后”）基于 depot 路径目录 + 规范化后的文件名，不读取本地路径
     """
     args = ["opened"]
     cl = (changelist or "").strip()
-    if cl:
+    if cl and cl != "default":
         args += ["-c", cl]
     r = ctx.Exec(args)
     if r.returncode != 0:
         return False, [], [], (r.stderr or r.stdout or "").strip()
 
-    paths = _parse_opened_lines(r.stdout)
-    pairs = []
-    targets = []
-    for dep in paths:
+    paths_actions = _parse_opened_lines(r.stdout)
+    pairs: List[Tuple[str, str]] = []
+    targets: List[str] = []
+
+    allowed = {"edit", "add", "move/add"}
+    for dep, action in paths_actions:
+        if action not in allowed:
+            continue
         d = dep.replace("\\", "/")
         dir_ = d.rsplit("/", 1)[0] if "/" in d else d
         base = d.rsplit("/", 1)[-1]
