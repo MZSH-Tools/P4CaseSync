@@ -19,9 +19,11 @@ def _natural_key(s: str):
 # ------------------ 进度弹窗 ------------------
 class ProgressDialog(Tk.Toplevel):
     """
-    模态进度窗：
-      - 运行中：显示进度条、当前步数、成功/失败；按钮=“中断”；点 × 或“中断”只设置 stop_event
-      - 完成后：按钮变为“关闭”，点按钮或 × 才关闭窗口；关闭时回调 on_closed（若设置）
+    模态进度窗（后台线程安全更新）：
+      - 顶部：进度条
+      - 信息：成功/失败/跳过 计数，状态（执行中/已完成），当前项信息
+      - 底部仅一个按钮：执行中为“中断”，完成后变为“关闭”
+      - 点右上角 ×：执行中则等价“中断”，完成后等价“关闭”
     """
     def __init__(self, master, total: int, stop_event=None):
         super().__init__(master)
@@ -29,6 +31,7 @@ class ProgressDialog(Tk.Toplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()  # 模态
+
         self._total = max(1, int(total))
         self._completed = False
         self._on_closed = None
@@ -41,25 +44,32 @@ class ProgressDialog(Tk.Toplevel):
         self.Bar = ttk.Progressbar(box, orient="horizontal", mode="determinate", maximum=self._total)
         self.Bar.pack(fill="x")
 
-        # 状态行：当前进度 + 成功/失败
-        row = ttk.Frame(box); row.pack(fill="x", pady=(pad, 0))
-        self.StepVar = Tk.StringVar(value=f"正在转换 0/{self._total}")
-        ttk.Label(row, textvariable=self.StepVar).pack(side="left")
+        # 计数行：成功/失败/跳过
+        counts = ttk.Frame(box); counts.pack(fill="x", pady=(pad, 0))
+        self.OkVar   = Tk.StringVar(value="成功 0")
+        self.FailVar = Tk.StringVar(value="失败 0")
+        self.SkipVar = Tk.StringVar(value="跳过 0")
+        ttk.Label(counts, textvariable=self.OkVar).pack(side="left")
+        ttk.Label(counts, text="  /  ").pack(side="left")
+        ttk.Label(counts, textvariable=self.FailVar).pack(side="left")
+        ttk.Label(counts, text="  /  ").pack(side="left")
+        ttk.Label(counts, textvariable=self.SkipVar).pack(side="left")
 
-        self.CountVar = Tk.StringVar(value="成功 0 / 失败 0")
-        ttk.Label(row, textvariable=self.CountVar).pack(side="right")
+        # 状态（执行中 / 已完成）
+        self.StateVar = Tk.StringVar(value=f"执行中… 0/{self._total}")
+        ttk.Label(box, textvariable=self.StateVar).pack(anchor="w", pady=(6, 0))
 
         # 当前项信息
         self.MsgVar = Tk.StringVar(value="")
-        ttk.Label(box, textvariable=self.MsgVar, foreground="#444").pack(anchor="w", pady=(6, 0))
+        ttk.Label(box, textvariable=self.MsgVar, foreground="#444").pack(anchor="w", pady=(2, 0))
 
-        # 按钮（运行中=中断；完成后=关闭）
+        # 单按钮：执行中=中断；完成=关闭
         btns = ttk.Frame(box); btns.pack(fill="x", pady=(pad, 0))
-        self.ActionBtn = ttk.Button(btns, text="中断", command=self._on_stop)
+        self.ActionBtn = ttk.Button(btns, text="中断", command=self._on_action)
         self.ActionBtn.pack(anchor="center")
 
-        # 关闭按钮行为
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 关闭按钮行为（X）
+        self.protocol("WM_DELETE_WINDOW", self._on_action)
 
         # 居中
         self.update_idletasks()
@@ -75,47 +85,48 @@ class ProgressDialog(Tk.Toplevel):
     def SetOnClosed(self, fn):
         self._on_closed = fn
 
-    def Update(self, done: int, ok: int, fail: int, msg: str = ""):
+    def Update(self, done: int, ok: int, fail: int, skip: int, msg: str = ""):
         done = max(0, min(int(done), self._total))
         self.Bar["value"] = done
-        self.StepVar.set(f"正在转换 {done}/{self._total}")
-        self.CountVar.set(f"成功 {ok} / 失败 {fail}")
+        self.OkVar.set(f"成功 {ok}")
+        self.FailVar.set(f"失败 {fail}")
+        self.SkipVar.set(f"跳过 {skip}")
+        state = "已完成" if self._completed else "执行中…"
+        self.StateVar.set(f"{state} {done}/{self._total}")
         self.MsgVar.set(msg or "")
         self.update_idletasks()
 
-    def MarkDone(self):
-        """切换为完成态：按钮改为“关闭”，允许真正关闭窗口"""
+    def MarkDone(self, ok: int, fail: int, skip: int):
+        """切换为完成态：按钮改“关闭”，允许真正关闭窗口"""
         self._completed = True
-        self.ActionBtn.configure(text="关闭", command=self._on_close, state="normal")
         self.Bar["value"] = self.Bar["maximum"]
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.update_idletasks()
+        self.ActionBtn.configure(text="关闭")
+        # 刷新状态一遍
+        self.Update(self._total, ok, fail, skip, "")
 
     # --- 内部行为 ---
-    def _on_stop(self):
-        # 运行中断开，仅设置标志，不关闭窗口
-        try:
-            if self._stop_event:
-                self._stop_event.set()
-        except Exception:
-            pass
-        self.ActionBtn.configure(state="disabled")
-
-    def _on_close(self):
-        # 未完成时，关闭 = 请求中断；完成后才真正关闭
+    def _on_action(self):
         if not self._completed:
-            self._on_stop()
-            return
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        self.destroy()
-        try:
-            if callable(self._on_closed):
-                self._on_closed()
-        except Exception:
-            pass
+            # 执行中：发出中断请求，不关闭窗口
+            try:
+                if self._stop_event:
+                    self._stop_event.set()
+            except Exception:
+                pass
+            # 给用户一点反馈，避免重复点
+            self.ActionBtn.configure(state="disabled", text="中断中…")
+        else:
+            # 已完成：关闭窗口并回调
+            try:
+                self.grab_release()
+            except Exception:
+                pass
+            self.destroy()
+            try:
+                if callable(self._on_closed):
+                    self._on_closed()
+            except Exception:
+                pass
 
 # ------------------ 主界面 ------------------
 class MainFrame(ttk.Frame):
@@ -244,13 +255,13 @@ class MainFrame(ttk.Frame):
         if on_closed:
             self._ProgDlg.SetOnClosed(on_closed)
 
-    def UpdateProgress(self, done: int, ok: int, fail: int, msg: str = ""):
+    def UpdateProgress(self, done: int, ok: int, fail: int, skip: int, msg: str = ""):
         if self._ProgDlg:
-            self._ProgDlg.Update(done, ok, fail, msg)
+            self._ProgDlg.Update(done, ok, fail, skip, msg)
 
-    def MarkProgressDone(self):
+    def MarkProgressDone(self, ok: int, fail: int, skip: int):
         if self._ProgDlg:
-            self._ProgDlg.MarkDone()
+            self._ProgDlg.MarkDone(ok, fail, skip)
 
     # ---------- 下拉 ----------
     def _set_cl_items(self, items):

@@ -74,15 +74,15 @@ def Main():
         if isinstance(f, MainFrame):
             f.OpenProgress(total, stop_event, on_closed)
 
-    def update_progress(done, ok, fail, msg=""):
+    def update_progress(done, ok, fail, skip, msg=""):
         f = current["frame"]
         if isinstance(f, MainFrame):
-            f.UpdateProgress(done, ok, fail, msg)
+            f.UpdateProgress(done, ok, fail, skip, msg)
 
-    def mark_progress_done():
+    def mark_progress_done(ok, fail, skip):
         f = current["frame"]
         if isinstance(f, MainFrame):
-            f.MarkProgressDone()
+            f.MarkProgressDone(ok, fail, skip)
 
     def show_error(msg):
         messagebox.showerror("错误", msg)
@@ -133,10 +133,11 @@ def Main():
         logs = []
         ok_count = 0
         fail_count = 0
+        skip_count = 0
 
         def after_progress_closed():
             # 进度窗关闭后再弹结果（避免与模态冲突）
-            msg_lines = [f"成功 {ok_count}，失败 {fail_count}"]
+            msg_lines = [f"成功 {ok_count}，失败 {fail_count}，跳过 {skip_count}"]
             tail = logs[-20:]
             if tail:
                 msg_lines.append("")
@@ -147,7 +148,7 @@ def Main():
         open_progress(total, stop_event=stop_evt, on_closed=after_progress_closed)
 
         def worker():
-            nonlocal ok_count, fail_count
+            nonlocal ok_count, fail_count, skip_count
             for i, idx in enumerate(indices, start=1):
                 if stop_evt.is_set():
                     logs.append("[INTERRUPT] 用户中断")
@@ -156,7 +157,8 @@ def Main():
                     src = pairs[idx][0]
                     dst = targets[idx]
                     if not dst or src == dst:
-                        ui(update_progress, i, ok_count, fail_count, "跳过无变化")
+                        skip_count += 1
+                        ui(update_progress, i, ok_count, fail_count, skip_count, "跳过无变化")
                         continue
 
                     step_msg = f"{src} → {dst}"
@@ -165,7 +167,7 @@ def Main():
                     if TrySingleMove(ctx["P4"], src, dst):
                         ok_count += 1
                         logs.append(f"[OK] move {src} -> {dst}")
-                        ui(update_progress, i, ok_count, fail_count, step_msg)
+                        ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
                         continue
 
                     # 双步
@@ -176,15 +178,15 @@ def Main():
                         fail_count += 1
                         logs.append(f"[FAIL] move {src} -> {dst}")
 
-                    ui(update_progress, i, ok_count, fail_count, step_msg)
+                    ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
 
                 except Exception as e:
                     fail_count += 1
                     logs.append(f"[EXCEPT] idx={idx} err={e!r}")
-                    ui(update_progress, i, ok_count, fail_count, f"异常：{e!r}")
+                    ui(update_progress, i, ok_count, fail_count, skip_count, f"异常：{e!r}")
 
             # 通知 UI：处理完毕（或被中断），按钮变“关闭”，等待用户点击
-            ui(mark_progress_done)
+            ui(mark_progress_done, ok_count, fail_count, skip_count)
 
         threading.Thread(target=worker, daemon=True).start()
 
