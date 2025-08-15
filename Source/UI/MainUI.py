@@ -1,136 +1,127 @@
 # MainUI.py
 # -*- coding: utf-8 -*-
 
-import os
 import tkinter as Tk
-from tkinter import ttk, messagebox, simpledialog
-from typing import List, Tuple
+from tkinter import ttk, messagebox
 
 class MainFrame(ttk.Frame):
     """
-    正常运行界面：
+    运行界面：
     - SetOnRefresh(handler): handler(Changelist) -> None
     - SetOnApply(handler): handler(Indices, Pairs, Targets) -> None
-    - RenderPairs(Pairs, Targets): 由外部(Main)回填数据
-    - ShowResult(OkCount, FailCount, LogsTail): 外部调用显示结果
+    - RenderPairs(Pairs, Targets): 回填数据
+    - ShowResult(OkCount, FailCount, LogsTail): 显示结果
     """
-    def __init__(self, Master):
-        super().__init__(Master, padding=8)
+    def __init__(self, master):
+        super().__init__(master, padding=8)
+        self.OnRefresh = None
+        self.OnApply   = None
 
-        self.OnRefreshHandler = None
-        self.OnApplyHandler   = None
+        # 顶部：Changelist + 刷新
+        top = ttk.Frame(self); top.pack(fill="x", pady=(0,8))
+        ttk.Label(top, text="Changelist#:").pack(side="left")
+        self.CLVar = Tk.StringVar()
+        ttk.Entry(top, textvariable=self.CLVar, width=16).pack(side="left", padx=6)
+        ttk.Button(top, text="刷新", command=self._on_refresh).pack(side="left")
 
-        # 顶部栏
-        Top = ttk.Frame(self); Top.pack(fill="x", padx=4, pady=4)
-        ttk.Label(Top, text="Changelist:").pack(side="left")
+        # 过滤
+        self.OnlyChangedVar = Tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="仅显示需要修改的文件", variable=self.OnlyChangedVar, command=self._apply_filter).pack(side="left", padx=12)
 
-        self.ClVar = Tk.StringVar(value="default")
-        self.ClCombo = ttk.Combobox(Top, textvariable=self.ClVar, width=18, state="readonly")
-        self.ClCombo.pack(side="left", padx=(6,12))
+        # 中部：左右两列（原路径 / 目标路径）
+        mid = ttk.Frame(self); mid.pack(fill="both", expand=True)
 
-        self.OnlyDiffVar = Tk.BooleanVar(value=True)
-        ttk.Checkbutton(Top, text="仅显示需要修改的文件", variable=self.OnlyDiffVar,
-                        command=self.OnRefreshClicked).pack(side="left")
+        left = ttk.LabelFrame(mid, text="原路径"); left.pack(side="left", fill="both", expand=True, padx=(0,4))
+        right= ttk.LabelFrame(mid, text="修改后路径"); right.pack(side="left", fill="both", expand=True, padx=(4,0))
 
-        ttk.Button(Top, text="刷新", command=self.OnRefreshClicked).pack(side="right")
+        self.LeftList  = Tk.Listbox(left, height=20, selectmode="extended")
+        self.RightList = Tk.Listbox(right, height=20, selectmode="extended")
+        self.LeftList.pack(fill="both", expand=True, padx=6, pady=6)
+        self.RightList.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # 中部：左右列表
-        Mid = ttk.Frame(self); Mid.pack(fill="both", expand=True)
-        Left = ttk.Frame(Mid); Left.pack(side="left", fill="both", expand=True, padx=(0,4))
-        Right = ttk.Frame(Mid); Right.pack(side="left", fill="both", expand=True, padx=(4,0))
+        # 底部：应用
+        bottom = ttk.Frame(self); bottom.pack(fill="x", pady=(8,0))
+        ttk.Button(bottom, text="应用修改", command=self._on_apply).pack(side="right")
 
-        ttk.Label(Left, text="Depot 路径（当前）").pack(anchor="w")
-        ttk.Label(Right, text="目标命名（双击编辑文件名）").pack(anchor="w")
+        # 状态/日志
+        self.StatusVar = Tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.StatusVar, foreground="#008000").pack(anchor="w", pady=(6,0))
 
-        self.LeftTree = ttk.Treeview(Left, columns=("Depot",), show="headings", selectmode="extended")
-        self.LeftTree.heading("Depot", text="depot path")
-        self.LeftTree.pack(fill="both", expand=True)
+        # 数据缓存
+        self._Pairs   = []  # [(SrcDepot, DstCandidate), ...]
+        self._Targets = []  # [DstDepot, ...]
+        self._ViewIdx = []  # 视图中的行对应 self._Pairs 的索引
 
-        self.RightTree = ttk.Treeview(Right, columns=("Target",), show="headings", selectmode="extended")
-        self.RightTree.heading("Target", text="target name")
-        self.RightTree.pack(fill="both", expand=True)
+        # 双击右侧项允许用户直接编辑目标路径
+        self.RightList.bind("<Double-Button-1>", self._on_edit_target)
 
-        # 底部：操作按钮
-        Bottom = ttk.Frame(self); Bottom.pack(fill="x", padx=4, pady=4)
-        ttk.Button(Bottom, text="应用（选中）", command=lambda: self.OnApplyClicked(True)).pack(side="right")
-        ttk.Button(Bottom, text="应用（全部）", command=lambda: self.OnApplyClicked(False)).pack(side="right", padx=(0,6))
+    # ------- 回调绑定 -------
+    def SetOnRefresh(self, handler):
+        self.OnRefresh = handler
 
-        # 数据
-        self.Pairs: List[Tuple[str, str]] = []
-        self.TargetNames: List[str] = []
+    def SetOnApply(self, handler):
+        self.OnApply = handler
 
-        self.BindEvents()
+    # ------- 对外渲染 -------
+    def RenderPairs(self, pairs, targets):
+        self._Pairs = list(pairs)
+        self._Targets = list(targets)
+        self._refresh_view()
 
-    # ------- 外部绑定 -------
-    def SetOnRefresh(self, Handler):
-        self.OnRefreshHandler = Handler
+    def ShowResult(self, ok_count, fail_count, logs_tail):
+        self.StatusVar.set(f"完成：成功 {ok_count}，失败 {fail_count}")
+        if logs_tail:
+            messagebox.showinfo("日志(末尾)", "\n".join(logs_tail[-20:]))
 
-    def SetOnApply(self, Handler):
-        self.OnApplyHandler = Handler
+    # ------- 内部逻辑 -------
+    def _refresh_view(self):
+        self.LeftList.delete(0, Tk.END)
+        self.RightList.delete(0, Tk.END)
+        self._ViewIdx = []
 
-    # ------- 事件绑定 -------
-    def BindEvents(self):
-        def OnEdit(Event):
-            Item = self.RightTree.focus()
-            if not Item:
-                return
-            Idx = int(self.RightTree.item(Item, "tags")[0])
-            Current = self.TargetNames[Idx]
-            NewName = simpledialog.askstring("编辑目标文件名", "仅修改文件名（不含路径）:", initialvalue=Current)
-            if not NewName:
-                return
-            if any(Ch in NewName for Ch in '<>:"|?*'):
-                messagebox.showwarning("非法字符", "文件名包含非法字符。")
-                return
-            self.TargetNames[Idx] = NewName
-            self.RenderRows()
-        self.RightTree.bind("<Double-1>", OnEdit)
+        only_changed = self.OnlyChangedVar.get()
+        for i,(src,_dstc) in enumerate(self._Pairs):
+            dst = self._Targets[i] if i < len(self._Targets) else ""
+            if only_changed and (not dst or dst == src):
+                continue
+            self._ViewIdx.append(i)
+            self.LeftList.insert(Tk.END, src)
+            self.RightList.insert(Tk.END, dst)
 
-    # ------- 按钮事件 -------
-    def OnRefreshClicked(self):
-        if self.OnRefreshHandler is None:
+    def _apply_filter(self):
+        self._refresh_view()
+
+    def _on_refresh(self):
+        if not callable(self.OnRefresh):
             messagebox.showerror("错误", "未绑定 OnRefresh 回调。")
             return
-        Changelist = self.ClVar.get() or "default"
-        self.OnRefreshHandler(Changelist)
+        self.OnRefresh(self.CLVar.get().strip())
 
-    def OnApplyClicked(self, UseSelection: bool):
-        if self.OnApplyHandler is None:
+    def _on_apply(self):
+        if not callable(self.OnApply):
             messagebox.showerror("错误", "未绑定 OnApply 回调。")
             return
-        if not self.Pairs:
-            messagebox.showinfo("提示", "没有可处理的文件。")
+        # 将当前视图中被选中的行映射回全量索引
+        sel = list(self.RightList.curselection())
+        if not sel:
+            sel = list(range(self.RightList.size()))  # 未选择则默认全部视图项
+        indices = [self._ViewIdx[i] for i in sel]
+        self.OnApply(indices, self._Pairs, self._Targets)
+
+    def _on_edit_target(self, _evt):
+        # 简单编辑器：把右侧选择的项替换为用户输入
+        idxs = self.RightList.curselection()
+        if not idxs:
             return
-
-        Indices = list(range(len(self.Pairs)))
-        if UseSelection:
-            SelTags = {T for I in self.RightTree.selection() for T in self.RightTree.item(I, "tags")}
-            if not SelTags:
-                messagebox.showinfo("提示", "未选择任何项。")
-                return
-            Indices = [int(T) for T in SelTags]
-
-        self.OnApplyHandler(Indices, self.Pairs, self.TargetNames)
-
-    # ------- 外部可调用 -------
-    def RenderPairs(self, Pairs: List[Tuple[str, str]], Targets: List[str]):
-        self.Pairs = Pairs
-        self.TargetNames = Targets
-        self.RenderRows()
-
-    def RenderRows(self):
-        self.LeftTree.delete(*self.LeftTree.get_children())
-        self.RightTree.delete(*self.RightTree.get_children())
-        OnlyDiff = self.OnlyDiffVar.get()
-        for Idx, (Depot, _Local) in enumerate(self.Pairs):
-            Target = self.TargetNames[Idx]
-            if OnlyDiff:
-                Base = os.path.basename(Depot).replace("\\", "/")
-                if Base == Target:
-                    continue
-            Tag = (str(Idx),)
-            self.LeftTree.insert("", "end", values=(Depot,), tags=Tag)
-            self.RightTree.insert("", "end", values=(Target,), tags=Tag)
-
-    def ShowResult(self, OkCount: int, FailCount: int, LogsTail: List[str]):
-        messagebox.showinfo("处理完成", f"成功：{OkCount}，失败：{FailCount}\n\n" + "\n".join(LogsTail))
+        i_view = idxs[0]
+        i_full = self._ViewIdx[i_view]
+        old = self._Targets[i_full]
+        win = Tk.Toplevel(self)
+        win.title("编辑目标路径")
+        v = Tk.StringVar(value=old)
+        Tk.Entry(win, textvariable=v, width=80).pack(padx=8, pady=8)
+        def ok():
+            self._Targets[i_full] = v.get().strip()
+            self._refresh_view()
+            win.destroy()
+        ttk.Button(win, text="确定", command=ok).pack(pady=(0,8))

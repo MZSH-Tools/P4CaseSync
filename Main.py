@@ -3,121 +3,154 @@
 
 import os
 import sys
+import tkinter as Tk
+from tkinter import messagebox
 
+# 若你使用 Source/ 目录结构，打开下一行注入；否则可忽略
 def InjectSysPath():
-    BaseDir  = os.path.dirname(os.path.abspath(__file__))
-    UiDir    = os.path.join(BaseDir, "Source", "UI")
-    LogicDir = os.path.join(BaseDir, "Source", "Logic")
-    for P in (UiDir, LogicDir):
-        if P not in sys.path:
-            sys.path.insert(0, P)
+    base = os.path.dirname(os.path.abspath(__file__))
+    for p in [
+        base,
+        os.path.join(base, "Source", "UI"),
+        os.path.join(base, "Source", "Logic"),
+    ]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+InjectSysPath()
 
-def NeedsPassword(Msg: str) -> bool:
-    S = (Msg or "").lower()
-    return ("password invalid" in S) or ("p4passwd" in S and "invalid" in S) or ("unset" in S and "password" in S)
+from LoginUI import LoginFrame
+from MainUI import MainFrame
+from Core import (
+    P4Context, GetOpenedPairs, NormalizeName,
+    TrySingleMove, TryTwoMoves,
+    GetCachedP4User, SaveCachedP4User,
+)
 
-def BuildTargetDepot(DepotPath: str, TargetName: str) -> str:
-    DirDepot = os.path.dirname(DepotPath).replace("\\", "/")
-    T = f"{DirDepot}/{TargetName}" if DirDepot else f"/{TargetName}"
-    T = T.replace("//", "/")
-    if not T.startswith("//"):
-        T = "/" + T.lstrip("/")
-        if not T.startswith("//"):
-            T = "/" + T  # 保底，确保以 // 开头
-    return T
+def NeedsPassword(msg: str) -> bool:
+    s = (msg or "").lower()
+    keys = [
+        "password", "login", "logged out", "not yet logged in",
+        "p4 login is required", "ticket", "perforce password"
+    ]
+    return any(k in s for k in keys)
 
 def Main():
-    InjectSysPath()
+    # ---- 全局上下文（Main 负责调度）----
+    ctx = {"P4": None}
 
-    # 延迟导入以便 sys.path 生效
-    from AppUI import AppUI
-    from Core import P4Context, GetOpenedPairs, NormalizeName, TrySingleMove, TryTwoMoves
+    # ---- Tk 根窗口与当前 Frame 引用 ----
+    root = Tk.Tk()
+    root.title("P4 SubmitList Tool")
+    current = {"frame": None}
 
-    App = AppUI()
+    def clear_frame():
+        f = current["frame"]
+        if f is not None:
+            f.destroy()
+        current["frame"] = None
 
-    # ---- 由 Main 持有的运行时状态 ----
-    Ctx = {"P4": None}
+    def show_login():
+        clear_frame()
+        f = LoginFrame(root)
+        current["frame"] = f
+        f.pack(fill="both", expand=True)
+        f.SetOnConnected(on_connected)  # 绑定连接回调
+        # 绑定预填（仅覆盖空白）
+        f.SetPrefillGetter(lambda: GetCachedP4User())
 
-    # ---- 回调：登录/连接 ----
-    def OnConnected(Server: str, User: str, Client: str, PasswordOrNone):
-        P4 = P4Context(Server, User, Client)
+    def show_main():
+        clear_frame()
+        f = MainFrame(root)
+        current["frame"] = f
+        f.pack(fill="both", expand=True)
+        f.SetOnRefresh(on_refresh)
+        f.SetOnApply(on_apply)
 
-        Ok, Msg = P4.Test()
-        if not Ok:
-            # 若需要密码，借用 LoginFrame 的弹窗
-            if NeedsPassword(Msg):
-                Prompt = getattr(App.CurrentFrame, "PromptPassword", None)
-                Password = Prompt() if callable(Prompt) else None
-                if not Password:
-                    App.ShowError("需要密码，但未提供。")
-                    return
-                OkLogin, MsgLogin = P4.Login(Password)
-                if not OkLogin:
-                    App.ShowError(f"登录失败：\n{MsgLogin or ''}".strip())
-                    return
-                Ok, Msg = P4.Test()
+    # ---- UI 更新便捷函数 ----
+    def render_pairs(pairs, targets):
+        f = current["frame"]
+        if isinstance(f, MainFrame):
+            f.RenderPairs(pairs, targets)
 
-        if not Ok:
-            App.ShowError(Msg or "连接失败")
-            return
+    def show_result(ok_count, fail_count, logs_tail):
+        f = current["frame"]
+        if isinstance(f, MainFrame):
+            f.ShowResult(ok_count, fail_count, logs_tail)
 
-        # 连接成功：保存上下文并切换到主界面
-        Ctx["P4"] = P4
-        App.SwitchToMain()
-        # 初次刷新
-        OnRefresh("default")
+    def show_error(msg):
+        messagebox.showerror("错误", msg)
 
-    # ---- 回调：刷新列表 ----
-    def OnRefresh(Changelist: str):
-        if not Ctx["P4"]:
-            App.ShowError("尚未连接到 Perforce。")
-            return
+    # ---- 事件回调（Main 连接 UI 与 Logic）----
+    def on_connected(server: str, user: str, client: str, password_or_none):
+        # 1) 构建 P4 上下文并测试
+        p4 = P4Context(server, user, client)
+        ok, msg = p4.Test()
+        if not ok:
+            # 可能需要密码：若未提供或失败，弹出一次
+            pw = password_or_none
+            if NeedsPassword(msg):
+                lf = current["frame"]
+                pw = lf.PromptPassword() if hasattr(lf, "PromptPassword") else None
+            if pw:
+                ok, msg = p4.Login(pw)
+            if not ok:
+                show_error(msg or "登录失败")
+                return
+
+        # 2) 写回缓存
         try:
-            Pairs = GetOpenedPairs(Ctx["P4"], Changelist or "default")  # [(DepotPath, LocalPath)]
-            Targets = [NormalizeName(LocalPath) for _, LocalPath in Pairs]
-            App.RenderPairs(Pairs, Targets)
-        except Exception as Ex:
-            App.ShowError(f"刷新失败：{Ex}")
+            SaveCachedP4User(server, user, client)
+        except Exception:
+            pass
 
-    # ---- 回调：应用改名 ----
-    def OnApply(Indices, Pairs, Targets):
-        if not Ctx["P4"]:
-            App.ShowError("尚未连接到 Perforce。")
+        # 3) 切换到主界面
+        ctx["P4"] = p4
+        show_main()
+
+    def on_refresh(changelist: str):
+        if not ctx["P4"]:
+            show_error("尚未连接 P4。")
             return
+        ok, pairs, targets, msg = GetOpenedPairs(ctx["P4"], changelist)
+        if not ok:
+            show_error(msg or "获取 Opened 列表失败")
+            return
+        render_pairs(pairs, targets)
 
-        OkCount, FailCount = 0, 0
-        Logs = []
-
-        for I in Indices:
-            Depot, _Local = Pairs[I]
-            if not isinstance(Depot, str) or not Depot.startswith("//"):
-                Logs.append(f"[跳过] 非法 depot: {Depot}")
-                continue
-
-            Target = Targets[I]
-            TargetDepot = BuildTargetDepot(Depot, Target)
-
+    def on_apply(indices, pairs, targets):
+        if not ctx["P4"]:
+            show_error("尚未连接 P4。")
+            return
+        ok_count = 0
+        fail_count = 0
+        logs = []
+        # indices：用户勾选的需要应用的行
+        for idx in indices:
             try:
-                if TrySingleMove(Ctx["P4"], Depot, TargetDepot) or TryTwoMoves(Ctx["P4"], Depot, TargetDepot):
-                    OkCount += 1
-                    Logs.append(f"[OK] {Depot} -> {TargetDepot}")
+                src = pairs[idx][0]
+                dst = targets[idx]
+                if not dst or src == dst:
+                    continue
+                # 单步尝试
+                if TrySingleMove(ctx["P4"], src, dst):
+                    ok_count += 1
+                    logs.append(f"[OK] move {src} -> {dst}")
+                    continue
+                # 双步（大小写敏感修正）
+                if TryTwoMoves(ctx["P4"], src, dst):
+                    ok_count += 1
+                    logs.append(f"[OK] move*2 {src} -> {dst}")
                 else:
-                    FailCount += 1
-                    Logs.append(f"[FAIL] {Depot} -> {TargetDepot}")
-            except Exception as Ex:
-                FailCount += 1
-                Logs.append(f"[EXC]  {Depot} -> {TargetDepot} : {Ex}")
+                    fail_count += 1
+                    logs.append(f"[FAIL] move {src} -> {dst}")
+            except Exception as e:
+                fail_count += 1
+                logs.append(f"[EXCEPT] idx={idx} err={e!r}")
+        show_result(ok_count, fail_count, logs[-50:])
 
-        App.ShowResult(OkCount, FailCount, Logs[-50:])
-
-    # ---- 将回调绑定到 UI ----
-    App.BindHandlers(
-        OnConnected=OnConnected,
-        OnRefresh=OnRefresh,
-        OnApply=OnApply,
-    )
-
-    App.mainloop()
+    # 初始显示登录页并进入事件循环
+    show_login()
+    root.mainloop()
 
 if __name__ == "__main__":
     Main()
