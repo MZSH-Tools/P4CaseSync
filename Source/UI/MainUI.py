@@ -16,17 +16,114 @@ def _natural_key(s: str):
     parts = re.split(r'(\d+)', s.casefold())
     return [int(p) if p.isdigit() else p for p in parts]
 
+# ------------------ 进度弹窗 ------------------
+class ProgressDialog(Tk.Toplevel):
+    """
+    模态进度窗：
+      - 运行中：显示进度条、当前步数、成功/失败；按钮=“中断”；点 × 或“中断”只设置 stop_event
+      - 完成后：按钮变为“关闭”，点按钮或 × 才关闭窗口；关闭时回调 on_closed（若设置）
+    """
+    def __init__(self, master, total: int, stop_event=None):
+        super().__init__(master)
+        self.title("执行中…")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()  # 模态
+        self._total = max(1, int(total))
+        self._completed = False
+        self._on_closed = None
+        self._stop_event = stop_event  # threading.Event
+
+        pad = 10
+        box = ttk.Frame(self, padding=pad); box.pack(fill="both", expand=True)
+
+        # 进度条
+        self.Bar = ttk.Progressbar(box, orient="horizontal", mode="determinate", maximum=self._total)
+        self.Bar.pack(fill="x")
+
+        # 状态行：当前进度 + 成功/失败
+        row = ttk.Frame(box); row.pack(fill="x", pady=(pad, 0))
+        self.StepVar = Tk.StringVar(value=f"正在转换 0/{self._total}")
+        ttk.Label(row, textvariable=self.StepVar).pack(side="left")
+
+        self.CountVar = Tk.StringVar(value="成功 0 / 失败 0")
+        ttk.Label(row, textvariable=self.CountVar).pack(side="right")
+
+        # 当前项信息
+        self.MsgVar = Tk.StringVar(value="")
+        ttk.Label(box, textvariable=self.MsgVar, foreground="#444").pack(anchor="w", pady=(6, 0))
+
+        # 按钮（运行中=中断；完成后=关闭）
+        btns = ttk.Frame(box); btns.pack(fill="x", pady=(pad, 0))
+        self.ActionBtn = ttk.Button(btns, text="中断", command=self._on_stop)
+        self.ActionBtn.pack(anchor="center")
+
+        # 关闭按钮行为
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 居中
+        self.update_idletasks()
+        try:
+            px = master.winfo_rootx(); py = master.winfo_rooty()
+            pw = master.winfo_width(); ph = master.winfo_height()
+            w = self.winfo_width();    h = self.winfo_height()
+            self.geometry(f"+{px + (pw - w)//2}+{py + (ph - h)//2}")
+        except Exception:
+            pass
+
+    # --- 外部 API ---
+    def SetOnClosed(self, fn):
+        self._on_closed = fn
+
+    def Update(self, done: int, ok: int, fail: int, msg: str = ""):
+        done = max(0, min(int(done), self._total))
+        self.Bar["value"] = done
+        self.StepVar.set(f"正在转换 {done}/{self._total}")
+        self.CountVar.set(f"成功 {ok} / 失败 {fail}")
+        self.MsgVar.set(msg or "")
+        self.update_idletasks()
+
+    def MarkDone(self):
+        """切换为完成态：按钮改为“关闭”，允许真正关闭窗口"""
+        self._completed = True
+        self.ActionBtn.configure(text="关闭", command=self._on_close, state="normal")
+        self.Bar["value"] = self.Bar["maximum"]
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.update_idletasks()
+
+    # --- 内部行为 ---
+    def _on_stop(self):
+        # 运行中断开，仅设置标志，不关闭窗口
+        try:
+            if self._stop_event:
+                self._stop_event.set()
+        except Exception:
+            pass
+        self.ActionBtn.configure(state="disabled")
+
+    def _on_close(self):
+        # 未完成时，关闭 = 请求中断；完成后才真正关闭
+        if not self._completed:
+            self._on_stop()
+            return
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+        try:
+            if callable(self._on_closed):
+                self._on_closed()
+        except Exception:
+            pass
+
+# ------------------ 主界面 ------------------
 class MainFrame(ttk.Frame):
     """
-    单列列表（两行显示：更改前/更改后）+ 勾选 + 多选 + 进度
-    选择仅影响高亮；点击勾选会把“当前已选择的所有行”的勾选状态批量改为该勾选的新状态。
-    API:
-      - SetOnListChangelists(fn)  -> 列出 changelists
-      - SetOnRefresh(fn)          -> 根据 changelist 刷新列表
-      - SetOnApply(fn)            -> 应用勾选的项
-      - RenderPairs(pairs, targets)
-      - ShowResult(ok, fail, logs_tail)
-      - StartProgress/UpdateProgress/EndProgress
+    单列列表（两行：更改前/更改后）+ 多选（仅高亮）+ 勾选（批量应用）
+    顶部：Changelist 下拉 + 过滤
+    列表上方一行：  [ ] 全选(可见)          已勾选 X / N
+    点击“应用修改”后弹出模态进度窗（后台线程执行；支持中断；完成后按钮=关闭）
     """
 
     HI_BG   = "#e6f2ff"   # 高亮背景
@@ -38,7 +135,7 @@ class MainFrame(ttk.Frame):
         self.OnRefresh = None
         self.OnApply   = None
 
-        # 顶部：Changelist 下拉 + 过滤 + 全选/全不选 + 勾选计数
+        # ===== 顶部：Changelist 下拉 + 过滤 =====
         top = ttk.Frame(self); top.pack(fill="x", pady=(0,8))
         ttk.Label(top, text="Changelist#:").pack(side="left")
 
@@ -53,16 +150,25 @@ class MainFrame(ttk.Frame):
         self.OnlyChangedVar = Tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="仅显示需要修改的文件",
                         variable=self.OnlyChangedVar,
-                        command=self._apply_filter).pack(side="left", padx=(12,6))
+                        command=self._apply_filter).pack(side="left", padx=(12,0))
 
-        ttk.Button(top, text="全选可见", command=self._check_all_visible).pack(side="left")
-        ttk.Button(top, text="全不选可见", command=self._uncheck_all_visible).pack(side="left", padx=(6,0))
+        # ===== 列表上方：全选 + 已勾选统计 =====
+        header = ttk.Frame(self); header.pack(fill="x", pady=(8,4))
+        self.SelectAllVar = Tk.BooleanVar(value=False)
+        self.SelectAllChk = ttk.Checkbutton(
+            header, text="全选(可见)",
+            variable=self.SelectAllVar,
+            command=self._on_select_all_toggle
+        )
+        self.SelectAllChk.pack(side="left")
 
-        self.CheckedStatVar = Tk.StringVar(value="已选中 0 / 0")
-        ttk.Label(top, textvariable=self.CheckedStatVar).pack(side="right")
+        self.CheckedStatVar = Tk.StringVar(value="已勾选 0 / 0")
+        self.CheckedStatLbl = ttk.Label(header, textvariable=self.CheckedStatVar)
+        self.CheckedStatLbl.pack(side="right")
 
-        # 中部：滚动区域（单列）
+        # ===== 中部：列表（滚动） =====
         mid = ttk.Frame(self); mid.pack(fill="both", expand=True)
+
         self.Canvas = Tk.Canvas(mid, highlightthickness=0)
         vbar = ttk.Scrollbar(mid, orient="vertical", command=self.Canvas.yview)
         self.Canvas.configure(yscrollcommand=vbar.set)
@@ -74,26 +180,22 @@ class MainFrame(ttk.Frame):
         self.ListArea.bind("<Configure>", lambda e: self.Canvas.configure(scrollregion=self.Canvas.bbox("all")))
         self.Canvas.bind("<Configure>", self._on_canvas_resize)
 
-        # 底部：应用 + 进度
-        bottom = ttk.Frame(self); bottom.pack(fill="x", pady=(8,0))
-        ttk.Button(bottom, text="应用修改", command=self._on_apply).pack(side="right")
+        # ===== 底部：应用按钮（居中） =====
+        btnBox = ttk.Frame(self); btnBox.pack(fill="x", pady=(8,0))
+        self.ApplyBtn = ttk.Button(btnBox, text="应用修改", command=self._on_apply)
+        self.ApplyBtn.pack(anchor="center")
 
-        progBox = ttk.Frame(bottom); progBox.pack(side="left", fill="x", expand=True)
-        self.ProgressTextVar = Tk.StringVar(value="就绪")
-        ttk.Label(progBox, textvariable=self.ProgressTextVar).pack(anchor="w")
-        self.ProgressBar = ttk.Progressbar(progBox, orient="horizontal", mode="determinate")
-        self.ProgressBar.pack(fill="x", expand=True, pady=(2,0))
-
-        # 数据缓存/状态
+        # ===== 数据状态 =====
         self._Pairs   = []   # [(src, dstCand), ...]
         self._Targets = []   # [dst, ...]
-        self._Order   = []   # 排序后的全量索引列表
+        self._Order   = []   # 排序后的全量索引
         self._ViewIdx = []   # 可见 -> 全量
         self._SelVars = []   # 与全量对齐的 BooleanVar（勾选）
         self._Rows    = {}   # {full_idx: rowFrame}
         self._SelectedSet = set()   # “高亮选择”的 full_idx 集合
         self._LastAnchor  = None    # Shift 锚点
-        self._BulkChecking = False  # 批量设置勾选时避免递归
+        self._BulkChecking = False  # 批量设置时避免递归
+        self._ProgDlg = None        # 进度窗引用
 
         # 下拉内容
         self._CLItems = []
@@ -106,7 +208,7 @@ class MainFrame(ttk.Frame):
     def SetOnRefresh(self, fn):         self.OnRefresh = fn
     def SetOnApply(self, fn):           self.OnApply = fn
 
-    # ---------- 对外渲染 ----------
+    # ---------- 对外：渲染 ----------
     def RenderPairs(self, pairs, targets):
         self._Pairs   = list(pairs)
         self._Targets = list(targets)
@@ -117,7 +219,7 @@ class MainFrame(ttk.Frame):
             for _ in range(n - len(self._SelVars)):
                 self._SelVars.append(Tk.BooleanVar(value=True))
 
-        # —— 自动排序（优先更改后文件名，其次更改后完整路径）——
+        # 自动排序：优先更改后文件名，其次更改后完整路径
         keys = []
         for i, (src, _dstcand) in enumerate(self._Pairs):
             dst  = self._Targets[i] if i < len(self._Targets) else ""
@@ -129,28 +231,26 @@ class MainFrame(ttk.Frame):
         self._refresh_view()
 
     def ShowResult(self, ok_count, fail_count, logs_tail):
-        self.ProgressTextVar.set(f"完成：成功 {ok_count}，失败 {fail_count}")
-        self.ProgressBar.stop(); self.ProgressBar["value"] = 0
+        # 结果弹窗由 Main 在进度窗关闭后弹，这里兜底
         if logs_tail:
             messagebox.showinfo("日志(末尾)", "\n".join(logs_tail[-20:]))
 
-    # ---------- 进度 ----------
-    def StartProgress(self, total:int):
-        self.ProgressBar["mode"] = "determinate"
-        self.ProgressBar["maximum"] = max(1, total)
-        self.ProgressBar["value"] = 0
-        self.ProgressTextVar.set(f"开始转换：0/{total}")
+    # ---------- 进度弹窗 API（给 Main 调用） ----------
+    def OpenProgress(self, total: int, stop_event, on_closed=None):
+        if self._ProgDlg:
+            try: self._ProgDlg.destroy()
+            except Exception: pass
+        self._ProgDlg = ProgressDialog(self.winfo_toplevel(), total, stop_event=stop_event)
+        if on_closed:
+            self._ProgDlg.SetOnClosed(on_closed)
 
-    def UpdateProgress(self, done:int, total:int, msg:str = ""):
-        self.ProgressBar["value"] = done
-        text = f"正在转换 {done}/{total}"
-        if msg: text += f"  {msg}"
-        self.ProgressTextVar.set(text)
-        self.update_idletasks()
+    def UpdateProgress(self, done: int, ok: int, fail: int, msg: str = ""):
+        if self._ProgDlg:
+            self._ProgDlg.Update(done, ok, fail, msg)
 
-    def EndProgress(self):
-        self.ProgressTextVar.set("转换完成")
-        self.ProgressBar["value"] = self.ProgressBar["maximum"]
+    def MarkProgressDone(self):
+        if self._ProgDlg:
+            self._ProgDlg.MarkDone()
 
     # ---------- 下拉 ----------
     def _set_cl_items(self, items):
@@ -185,7 +285,7 @@ class MainFrame(ttk.Frame):
         self._refresh_view()
 
     def _refresh_view(self):
-        # 清空旧行 & 选择
+        # 清空旧行/选择
         for w in self._Rows.values():
             try: w.destroy()
             except Exception: pass
@@ -204,33 +304,50 @@ class MainFrame(ttk.Frame):
             self._create_row(i, src, dst)
 
         self._update_checked_stat()
+        self._sync_select_all_state()
 
     def _create_row(self, idx, src, dst):
         row = Tk.Frame(self.ListArea, bg=self.NORM_BG, padx=6, pady=6)
         row.pack(fill="x", expand=True)
 
-        # 勾选框（点击时：把“当前已选择的所有行”的勾选统一为本次的新状态）
         chk = ttk.Checkbutton(row, variable=self._SelVars[idx],
                               command=lambda i=idx: self._on_check_toggle(i))
         chk.grid(row=0, column=0, rowspan=2, padx=(0,6), sticky="n")
 
-        # 两行文本
         t1 = Tk.Label(row, text=f"更改前：{src}", anchor="w", bg=self.NORM_BG)
         t2 = Tk.Label(row, text=f"更改后：{dst}", anchor="w", bg=self.NORM_BG, fg="#2a6f2a")
         t1.grid(row=0, column=1, sticky="w")
         t2.grid(row=1, column=1, sticky="w")
 
-        # 行选择（仅改变高亮，不触发勾选变化）
+        # 选择（高亮）
         for w in (row, t1, t2):
             w.bind("<Button-1>", lambda e, i=idx: self._on_row_select(i, e))
 
-        # 分割线
+        # 双击“更改后”允许编辑目标路径
+        t2.bind("<Double-Button-1>", lambda e, i=idx: self._edit_target(i))
+
         sep = ttk.Separator(self.ListArea, orient="horizontal")
         sep.pack(fill="x")
 
         self._Rows[idx] = row
 
-    # ---------- 选择（高亮）逻辑 ----------
+    def _edit_target(self, idx):
+        """编辑更改后路径"""
+        old = self._Targets[idx]
+        win = Tk.Toplevel(self)
+        win.title("编辑目标路径")
+        v = Tk.StringVar(value=old)
+        Tk.Entry(win, textvariable=v, width=90).pack(padx=10, pady=10)
+        def ok():
+            self._Targets[idx] = v.get().strip()
+            win.destroy()
+            self._refresh_view()
+        ttk.Button(win, text="确定", command=ok).pack(pady=(0,10))
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.wait_window()
+
+    # ---------- 选择（仅高亮） ----------
     def _on_row_select(self, idx, event):
         shift = bool(event.state & 0x0001)
         ctrl  = bool(event.state & 0x0004)
@@ -243,8 +360,7 @@ class MainFrame(ttk.Frame):
                 self._set_selected(idx, True)
             else:
                 start, end = sorted((a, b))
-                if not ctrl:
-                    self._clear_selection()
+                if not ctrl: self._clear_selection()
                 for pos in range(start, end + 1):
                     self._set_selected(self._ViewIdx[pos], True)
         else:
@@ -254,7 +370,7 @@ class MainFrame(ttk.Frame):
                 self._clear_selection()
                 self._set_selected(idx, True)
 
-        self._LastAnchor = idx  # 更新锚点
+        self._LastAnchor = idx
 
     def _view_pos(self, full_idx):
         try:
@@ -268,10 +384,8 @@ class MainFrame(ttk.Frame):
         self._SelectedSet.clear()
 
     def _set_selected(self, idx, on: bool):
-        if on:
-            self._SelectedSet.add(idx)
-        else:
-            self._SelectedSet.discard(idx)
+        if on:  self._SelectedSet.add(idx)
+        else:   self._SelectedSet.discard(idx)
         self._paint_selected(idx, on)
 
     def _paint_selected(self, idx, on: bool):
@@ -286,27 +400,22 @@ class MainFrame(ttk.Frame):
             except Exception:
                 pass
 
-    # ---------- 勾选（Check）逻辑 ----------
+    # ---------- 勾选逻辑 ----------
     def _on_check_toggle(self, idx):
         """
-        点击某一行的勾选框：
-        - 若该行不在当前选择集：先清空选择→仅选中该行→按新状态设置（只改这一行）
-        - 若该行在当前选择集：把当前“已选择的所有行”的勾选状态统一成该行的新状态
+        勾选框点击：
+        - 若该行不在选择集中：清空选择→仅选中该行→只改这一行的勾选
+        - 若在选择集中：把当前选择集内的所有行勾选统一为此勾选的新状态
         """
-        # 勾选框已经把自身变量切到新状态了
         new_state = self._SelVars[idx].get()
 
-        # 规则：只有在“修改自己（位于选择集内）”时才保留选择集
         if idx not in self._SelectedSet:
-            # 不在选择集：改为单选该行
             self._clear_selection()
             self._set_selected(idx, True)
             targets = {idx}
         else:
-            # 在选择集：批量应用到已选择的所有行
             targets = self._SelectedSet.copy()
 
-        # 批量写入勾选变量（避免递归触发 command）
         try:
             self._BulkChecking = True
             for i in targets:
@@ -315,7 +424,7 @@ class MainFrame(ttk.Frame):
             self._BulkChecking = False
 
         self._update_checked_stat()
-
+        self._sync_select_all_state()
 
     def _update_checked_stat(self):
         visible_total = len(self._ViewIdx)
@@ -326,23 +435,20 @@ class MainFrame(ttk.Frame):
                     checked += 1
             except Exception:
                 pass
-        self.CheckedStatVar.set(f"已选中 {checked} / {visible_total}")
+        self.CheckedStatVar.set(f"已勾选 {checked} / {visible_total}")
 
-    # ---------- 顶部按钮（全选/全不选 → 勾选） ----------
-    def _check_all_visible(self):
+    def _sync_select_all_state(self):
+        if not self._ViewIdx:
+            self.SelectAllVar.set(False); return
+        all_on = all(self._SelVars[i].get() for i in self._ViewIdx)
+        self.SelectAllVar.set(bool(all_on))
+
+    def _on_select_all_toggle(self):
+        target = bool(self.SelectAllVar.get())
         try:
             self._BulkChecking = True
             for i in self._ViewIdx:
-                self._SelVars[i].set(True)
-        finally:
-            self._BulkChecking = False
-        self._update_checked_stat()
-
-    def _uncheck_all_visible(self):
-        try:
-            self._BulkChecking = True
-            for i in self._ViewIdx:
-                self._SelVars[i].set(False)
+                self._SelVars[i].set(target)
         finally:
             self._BulkChecking = False
         self._update_checked_stat()

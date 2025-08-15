@@ -3,6 +3,7 @@
 
 import os
 import sys
+import threading
 import tkinter as Tk
 from tkinter import messagebox
 
@@ -34,6 +35,10 @@ def Main():
     root.title("P4 SubmitList Tool")
     current = {"frame": None}
 
+    def ui(fn, *a, **kw):
+        """把 UI 更新投递到主线程"""
+        root.after(0, lambda: fn(*a, **kw))
+
     def clear_frame():
         f = current["frame"]
         if f is not None:
@@ -64,22 +69,20 @@ def Main():
         if isinstance(f, MainFrame):
             f.RenderPairs(pairs, targets)
 
-    def show_result(ok_count, fail_count, logs_tail):
+    def open_progress(total, stop_event, on_closed):
         f = current["frame"]
         if isinstance(f, MainFrame):
-            f.ShowResult(ok_count, fail_count, logs_tail)
+            f.OpenProgress(total, stop_event, on_closed)
 
-    def start_progress(total):
+    def update_progress(done, ok, fail, msg=""):
         f = current["frame"]
-        if isinstance(f, MainFrame): f.StartProgress(total)
+        if isinstance(f, MainFrame):
+            f.UpdateProgress(done, ok, fail, msg)
 
-    def update_progress(done, total, msg=""):
+    def mark_progress_done():
         f = current["frame"]
-        if isinstance(f, MainFrame): f.UpdateProgress(done, total, msg)
-
-    def end_progress():
-        f = current["frame"]
-        if isinstance(f, MainFrame): f.EndProgress()
+        if isinstance(f, MainFrame):
+            f.MarkProgressDone()
 
     def show_error(msg):
         messagebox.showerror("错误", msg)
@@ -126,40 +129,64 @@ def Main():
         if total == 0:
             messagebox.showinfo("提示", "没有需要应用的项。"); return
 
+        stop_evt = threading.Event()
+        logs = []
         ok_count = 0
         fail_count = 0
-        logs = []
 
-        start_progress(total)
-        for i, idx in enumerate(indices, start=1):
-            try:
-                src = pairs[idx][0]
-                dst = targets[idx]
-                if not dst or src == dst:
-                    update_progress(i, total, "跳过无变化")
-                    continue
+        def after_progress_closed():
+            # 进度窗关闭后再弹结果（避免与模态冲突）
+            msg_lines = [f"成功 {ok_count}，失败 {fail_count}"]
+            tail = logs[-20:]
+            if tail:
+                msg_lines.append("")
+                msg_lines.append("\n".join(tail))
+            messagebox.showinfo("执行结果", "\n".join(msg_lines))
 
-                stepMsg = f"{src} -> {dst}"
-                # 单步尝试
-                if TrySingleMove(ctx["P4"], src, dst):
-                    ok_count += 1
-                    logs.append(f"[OK] move {src} -> {dst}")
-                    update_progress(i, total, stepMsg)
-                    continue
-                # 双步
-                if TryTwoMoves(ctx["P4"], src, dst):
-                    ok_count += 1
-                    logs.append(f"[OK] move*2 {src} -> {dst}")
-                else:
+        # 打开进度窗（主线程）
+        open_progress(total, stop_event=stop_evt, on_closed=after_progress_closed)
+
+        def worker():
+            nonlocal ok_count, fail_count
+            for i, idx in enumerate(indices, start=1):
+                if stop_evt.is_set():
+                    logs.append("[INTERRUPT] 用户中断")
+                    break
+                try:
+                    src = pairs[idx][0]
+                    dst = targets[idx]
+                    if not dst or src == dst:
+                        ui(update_progress, i, ok_count, fail_count, "跳过无变化")
+                        continue
+
+                    step_msg = f"{src} → {dst}"
+
+                    # 单步尝试
+                    if TrySingleMove(ctx["P4"], src, dst):
+                        ok_count += 1
+                        logs.append(f"[OK] move {src} -> {dst}")
+                        ui(update_progress, i, ok_count, fail_count, step_msg)
+                        continue
+
+                    # 双步
+                    if TryTwoMoves(ctx["P4"], src, dst):
+                        ok_count += 1
+                        logs.append(f"[OK] move*2 {src} -> {dst}")
+                    else:
+                        fail_count += 1
+                        logs.append(f"[FAIL] move {src} -> {dst}")
+
+                    ui(update_progress, i, ok_count, fail_count, step_msg)
+
+                except Exception as e:
                     fail_count += 1
-                    logs.append(f"[FAIL] move {src} -> {dst}")
-                update_progress(i, total, stepMsg)
-            except Exception as e:
-                fail_count += 1
-                logs.append(f"[EXCEPT] idx={idx} err={e!r}")
-                update_progress(i, total, f"异常：{e!r}")
-        end_progress()
-        show_result(ok_count, fail_count, logs[-50:])
+                    logs.append(f"[EXCEPT] idx={idx} err={e!r}")
+                    ui(update_progress, i, ok_count, fail_count, f"异常：{e!r}")
+
+            # 通知 UI：处理完毕（或被中断），按钮变“关闭”，等待用户点击
+            ui(mark_progress_done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     show_login()
     root.mainloop()
