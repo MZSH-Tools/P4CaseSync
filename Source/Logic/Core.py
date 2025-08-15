@@ -81,18 +81,35 @@ class P4Context:
         msg = (err or out or "").strip()
         return ok, msg
 
+# ===================== Changelist 列表（待提交）=====================
+def GetPendingChangelists(ctx: P4Context, Max: int = 50) -> List[Tuple[str, str]]:
+    """
+    获取当前工作区的“待提交” changelist 列表（不含已提交），用于下拉选择。
+    返回: [(id, label), ...]
+        id: "default" 或 数字字符串
+        label: 用于 UI 展示，如 "12345 - 修复命名大小写"
+    """
+    out: List[Tuple[str, str]] = []
+    # p4 changes -c <client> -s pending -m N
+    r = ctx.Exec(["changes", "-c", ctx.Client, "-s", "pending", "-m", str(Max)])
+    if r.returncode != 0:
+        return out
+    # 行示例：Change 12345 on 2025/08/10 by user@client 'desc...'
+    for line in (r.stdout or "").splitlines():
+        m = re.match(r"^Change\s+(\d+)\s+on\s+.+? by .+? '(.+)'", line.strip())
+        if not m:
+            continue
+        cl = m.group(1)
+        desc = (m.group(2) or "").strip()
+        label = f"{cl} - {desc}"
+        out.append((cl, label))
+    return out
+
 # ===================== 名称规范化 & Opened 列表 =====================
 def NormalizeName(name: str) -> str:
-    """
-    简单示例：去除两端空白，保持原大小写；你可以按需要替换为“大小写规则/下划线转驼峰”等。
-    """
     return (name or "").strip()
 
 def _parse_opened_lines(text: str) -> List[str]:
-    """
-    解析 `p4 opened` 输出中的 //depot/... 路径。
-    典型行：//depot/Proj/File.txt#3 - edit default change (text)
-    """
     out = []
     for line in (text or "").splitlines():
         m = re.match(r"^(//.+?)(?:#\d+)?\s+-\s+\w+\b", line.strip())
@@ -102,10 +119,8 @@ def _parse_opened_lines(text: str) -> List[str]:
 
 def GetOpenedPairs(ctx: P4Context, changelist: str) -> Tuple[bool, List[Tuple[str,str]], List[str], str]:
     """
-    返回：
-      ok, pairs, targets, msg
-      pairs: [(SrcDepot, DstCandidate), ...]
-      targets: [DstDepot, ...] —— 初始用 NormalizeName 处理同目录下文件名
+    ok, pairs, targets, msg
+    - changelist 可为 "" / "default" / "12345"
     """
     args = ["opened"]
     cl = (changelist or "").strip()
@@ -119,28 +134,21 @@ def GetOpenedPairs(ctx: P4Context, changelist: str) -> Tuple[bool, List[Tuple[st
     pairs = []
     targets = []
     for dep in paths:
-        # 目标：同目录 + 规范化后的文件名（示例规则）
         d = dep.replace("\\", "/")
         dir_ = d.rsplit("/", 1)[0] if "/" in d else d
         base = d.rsplit("/", 1)[-1]
         new_base = NormalizeName(base)
         dst = f"{dir_}/{new_base}" if new_base else d
-        pairs.append((d, dst))         # 第二列保留“建议”，仅用于 UI 展示
-        targets.append(dst)            # 可被 UI 编辑
+        pairs.append((d, dst))
+        targets.append(dst)
     return True, pairs, targets, ""
 
 # ===================== 移动（大小写修正）=====================
 def TrySingleMove(ctx: P4Context, src_depot: str, dst_depot: str) -> bool:
-    """
-    直接 p4 move
-    """
     r = ctx.Exec(["move", src_depot, dst_depot])
     return r.returncode == 0
 
 def TryTwoMoves(ctx: P4Context, src_depot: str, dst_depot: str) -> bool:
-    """
-    两步法：src -> temp -> dst，用于大小写不敏感文件系统修正。
-    """
     dir_ = os.path.dirname(dst_depot).replace("\\", "/")
     base = os.path.basename(dst_depot)
     temp_name = f"{base}.__tmp__"

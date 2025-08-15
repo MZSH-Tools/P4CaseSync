@@ -6,14 +6,9 @@ import sys
 import tkinter as Tk
 from tkinter import messagebox
 
-# 若你使用 Source/ 目录结构，打开下一行注入；否则可忽略
 def InjectSysPath():
     base = os.path.dirname(os.path.abspath(__file__))
-    for p in [
-        base,
-        os.path.join(base, "Source", "UI"),
-        os.path.join(base, "Source", "Logic"),
-    ]:
+    for p in [base, os.path.join(base, "Source", "UI"), os.path.join(base, "Source", "Logic")]:
         if p not in sys.path:
             sys.path.insert(0, p)
 InjectSysPath()
@@ -24,21 +19,17 @@ from Core import (
     P4Context, GetOpenedPairs, NormalizeName,
     TrySingleMove, TryTwoMoves,
     GetCachedP4User, SaveCachedP4User,
+    GetPendingChangelists,   # << 新增导入
 )
 
 def NeedsPassword(msg: str) -> bool:
     s = (msg or "").lower()
-    keys = [
-        "password", "login", "logged out", "not yet logged in",
-        "p4 login is required", "ticket", "perforce password"
-    ]
+    keys = ["password", "login", "logged out", "not yet logged in", "p4 login is required", "ticket", "perforce password"]
     return any(k in s for k in keys)
 
 def Main():
-    # ---- 全局上下文（Main 负责调度）----
     ctx = {"P4": None}
 
-    # ---- Tk 根窗口与当前 Frame 引用 ----
     root = Tk.Tk()
     root.title("P4 SubmitList Tool")
     current = {"frame": None}
@@ -54,8 +45,7 @@ def Main():
         f = LoginFrame(root)
         current["frame"] = f
         f.pack(fill="both", expand=True)
-        f.SetOnConnected(on_connected)  # 绑定连接回调
-        # 绑定预填（仅覆盖空白）
+        f.SetOnConnected(on_connected)
         f.SetPrefillGetter(lambda: GetCachedP4User())
 
     def show_main():
@@ -63,8 +53,11 @@ def Main():
         f = MainFrame(root)
         current["frame"] = f
         f.pack(fill="both", expand=True)
-        f.SetOnRefresh(on_refresh)
+        f.SetOnListChangelists(on_list_changelists)  # << 提供下拉获取列表
+        f.SetOnRefresh(on_refresh)                   # << 选择后自动刷新
         f.SetOnApply(on_apply)
+        # 默认载入 default（给出一个即时视图）
+        on_refresh("default")
 
     # ---- UI 更新便捷函数 ----
     def render_pairs(pairs, targets):
@@ -80,13 +73,11 @@ def Main():
     def show_error(msg):
         messagebox.showerror("错误", msg)
 
-    # ---- 事件回调（Main 连接 UI 与 Logic）----
+    # ---- 事件回调 ----
     def on_connected(server: str, user: str, client: str, password_or_none):
-        # 1) 构建 P4 上下文并测试
         p4 = P4Context(server, user, client)
         ok, msg = p4.Test()
         if not ok:
-            # 可能需要密码：若未提供或失败，弹出一次
             pw = password_or_none
             if NeedsPassword(msg):
                 lf = current["frame"]
@@ -96,16 +87,18 @@ def Main():
             if not ok:
                 show_error(msg or "登录失败")
                 return
-
-        # 2) 写回缓存
         try:
             SaveCachedP4User(server, user, client)
         except Exception:
             pass
-
-        # 3) 切换到主界面
         ctx["P4"] = p4
         show_main()
+
+    def on_list_changelists():
+        """提供给 MainUI：返回 [(id, label)]，每次展开下拉都会调用"""
+        if not ctx["P4"]:
+            return [("default", "default (未提交)")]
+        return GetPendingChangelists(ctx["P4"], Max=50)
 
     def on_refresh(changelist: str):
         if not ctx["P4"]:
@@ -124,19 +117,16 @@ def Main():
         ok_count = 0
         fail_count = 0
         logs = []
-        # indices：用户勾选的需要应用的行
         for idx in indices:
             try:
                 src = pairs[idx][0]
                 dst = targets[idx]
                 if not dst or src == dst:
                     continue
-                # 单步尝试
                 if TrySingleMove(ctx["P4"], src, dst):
                     ok_count += 1
                     logs.append(f"[OK] move {src} -> {dst}")
                     continue
-                # 双步（大小写敏感修正）
                 if TryTwoMoves(ctx["P4"], src, dst):
                     ok_count += 1
                     logs.append(f"[OK] move*2 {src} -> {dst}")
@@ -148,7 +138,6 @@ def Main():
                 logs.append(f"[EXCEPT] idx={idx} err={e!r}")
         show_result(ok_count, fail_count, logs[-50:])
 
-    # 初始显示登录页并进入事件循环
     show_login()
     root.mainloop()
 
