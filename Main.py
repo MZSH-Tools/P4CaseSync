@@ -1,4 +1,3 @@
-# Main.py
 # -*- coding: utf-8 -*-
 
 import os
@@ -33,6 +32,18 @@ def Main():
 
     root = Tk.Tk()
     root.title("P4 SubmitList Tool")
+
+    # === 新增：窗口居中 ===
+    root.update_idletasks()
+    w = root.winfo_width()
+    h = root.winfo_height()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = (sw - w) // 2
+    y = (sh - h) // 2
+    root.geometry(f"+{x}+{y}")
+    # === 居中结束 ===
+
     current = {"frame": None}
 
     def ui(fn, *a, **kw):
