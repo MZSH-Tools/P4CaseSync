@@ -47,7 +47,7 @@ def Main():
     root.title("P4 SubmitList Tool")
 
     # —— 选择主题：尽量让 ttk.Checkbutton 显示“✔”而不是“X”
-    current_theme = _choose_theme()
+    _choose_theme()
 
     # === 窗口居中 ===
     root.update_idletasks()
@@ -61,11 +61,9 @@ def Main():
     # === 居中结束 ===
 
     current = {"frame": None}
-    # 记录当前选中的 changelist（用于一致性检测过滤 opened）
-    state = {"current_cl": "default"}
+    state = {"current_cl": "default"}  # 记录当前选择的 changelist
 
     def ui(fn, *a, **kw):
-        """把 UI 更新投递到主线程"""
         root.after(0, lambda: fn(*a, **kw))
 
     def clear_frame():
@@ -90,7 +88,7 @@ def Main():
         f.SetOnListChangelists(on_list_changelists)
         f.SetOnRefresh(on_refresh)
         f.SetOnApply(on_apply)
-        on_refresh("default")  # 默认载入
+        on_refresh("default")
 
     # ---- UI 便捷 ----
     def render_pairs(pairs, targets):
@@ -145,7 +143,6 @@ def Main():
     def on_refresh(changelist: str):
         if not ctx["P4"]:
             show_error("尚未连接 P4。"); return
-        # 记录当前 cl，用于后续一致性检测
         state["current_cl"] = (changelist or "default")
         ok, pairs, targets, msg = GetOpenedPairs(ctx["P4"], changelist)
         if not ok:
@@ -167,7 +164,6 @@ def Main():
         skip_count = 0
 
         def after_progress_closed():
-            # 进度窗关闭后再弹结果（避免与模态冲突）
             msg_lines = [f"成功 {ok_count}，失败 {fail_count}，跳过 {skip_count}"]
             tail = logs[-20:]
             if tail:
@@ -175,26 +171,19 @@ def Main():
                 msg_lines.append("\n".join(tail))
             messagebox.showinfo("执行结果", "\n".join(msg_lines))
 
-        # 打开进度窗（主线程）
         open_progress(total, stop_event=stop_evt, on_closed=after_progress_closed)
 
-        # === 一致性检测工具 ===
+        # —— 一致性检测工具（基于当前 CL）
         def _opened_paths_in_current_cl():
-            """返回当前 CL 下的已打开 depot 路径列表"""
             ok2, p2, _t2, _ = GetOpenedPairs(ctx["P4"], state["current_cl"])
             if not ok2:
                 return []
             return [src for (src, _dstcand) in p2]
 
         def _is_exact_match(dst: str) -> bool:
-            """是否已存在与 dst 完全一致（大小写也一致）的 opened 路径"""
             return any(p == dst for p in _opened_paths_in_current_cl())
 
         def _find_casefold_match(dst: str):
-            """
-            在当前 CL 的 opened 中，找到与 dst 大小写不敏感相等的“实际路径”，
-            用于在方法1后定位真实源（若大小写仍不符，需要从实际路径做方法2）。
-            """
             dlow = (dst or "").casefold()
             for p in _opened_paths_in_current_cl():
                 if p.casefold() == dlow:
@@ -208,8 +197,8 @@ def Main():
                     logs.append("[INTERRUPT] 用户中断")
                     break
                 try:
-                    src = pairs[idx][0]   # 原始 depot 路径
-                    dst = targets[idx]    # 期望目标路径（大小写已规范化）
+                    src = pairs[idx][0]
+                    dst = targets[idx]
                     if not dst or src == dst:
                         skip_count += 1
                         ui(update_progress, i, ok_count, fail_count, skip_count, "跳过无变化")
@@ -217,43 +206,34 @@ def Main():
 
                     step_msg = f"{src} → {dst}"
 
-                    # ---------- 方法1：单步移动 ----------
+                    # 方法1
                     if TrySingleMove(ctx["P4"], src, dst):
-                        # 执行后立刻做一致性检测（必须完全相等）
                         if _is_exact_match(dst):
                             ok_count += 1
                             logs.append(f"[OK] move {src} -> {dst}")
                             ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
                             continue
+                        # 方法2修正
+                        cur = _find_casefold_match(dst)
+                        if cur and TryTwoMoves(ctx["P4"], cur, dst) and _is_exact_match(dst):
+                            ok_count += 1
+                            logs.append(f"[OK] move*2(fix-after-1st) {cur} -> {dst}")
+                            ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                            continue
                         else:
-                            # 方法1执行了，但大小写等细节不一致，需要通过方法2再修正
-                            current_path = _find_casefold_match(dst)
-                            if not current_path:
-                                # 找不到当前实际项，无法继续纠正
-                                fail_count += 1
-                                logs.append(f"[FAIL] move(after-1st-move not matched & not found) {src} -> {dst}")
-                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
-                                continue
-                            # 用实际路径执行方法2
-                            if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
-                                ok_count += 1
-                                logs.append(f"[OK] move*2(fix-after-1st) {current_path} -> {dst}")
-                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
-                                continue
-                            else:
-                                fail_count += 1
-                                logs.append(f"[FAIL] move*2(fix-after-1st) {current_path} -> {dst}")
-                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
-                                continue
+                            fail_count += 1
+                            logs.append(f"[FAIL] move(after-1st) {src} -> {dst}")
+                            ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                            continue
 
-                    # ---------- 方法2：双步移动（直接尝试） ----------
-                    current_path = _find_casefold_match(dst) or src
-                    if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
+                    # 方法2（直接）
+                    cur = _find_casefold_match(dst) or src
+                    if TryTwoMoves(ctx["P4"], cur, dst) and _is_exact_match(dst):
                         ok_count += 1
-                        logs.append(f"[OK] move*2 {current_path} -> {dst}")
+                        logs.append(f"[OK] move*2 {cur} -> {dst}")
                     else:
                         fail_count += 1
-                        logs.append(f"[FAIL] move {current_path} -> {dst}")
+                        logs.append(f"[FAIL] move {cur} -> {dst}")
 
                     ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
 
@@ -262,7 +242,6 @@ def Main():
                     logs.append(f"[EXCEPT] idx={idx} err={e!r}")
                     ui(update_progress, i, ok_count, fail_count, skip_count, f"异常：{e!r}")
 
-            # 通知 UI：处理完毕（或被中断），按钮变“关闭”，等待用户点击
             ui(mark_progress_done, ok_count, fail_count, skip_count)
 
         threading.Thread(target=worker, daemon=True).start()

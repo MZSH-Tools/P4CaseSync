@@ -17,19 +17,12 @@ def _natural_key(s: str):
 
 # ------------------ 进度弹窗 ------------------
 class ProgressDialog(Tk.Toplevel):
-    """
-    模态进度窗（后台线程安全更新）：
-      - 顶部：进度条
-      - 信息：成功/失败/跳过 计数，状态（执行中/已完成），当前项信息
-      - 底部仅一个按钮：执行中为“中断”，完成后变为“关闭”
-      - 点右上角 ×：执行中则等价“中断”，完成后等价“关闭”
-    """
     def __init__(self, master, total: int, stop_event=None):
         super().__init__(master)
         self.title("执行中…")
         self.resizable(False, False)
         self.transient(master)
-        self.grab_set()  # 模态
+        self.grab_set()
 
         self._total = max(1, int(total))
         self._completed = False
@@ -39,11 +32,9 @@ class ProgressDialog(Tk.Toplevel):
         pad = 10
         box = ttk.Frame(self, padding=pad); box.pack(fill="both", expand=True)
 
-        # 进度条
         self.Bar = ttk.Progressbar(box, orient="horizontal", mode="determinate", maximum=self._total)
         self.Bar.pack(fill="x")
 
-        # 计数行：成功/失败/跳过
         counts = ttk.Frame(box); counts.pack(fill="x", pady=(pad, 0))
         self.OkVar   = Tk.StringVar(value="成功 0")
         self.FailVar = Tk.StringVar(value="失败 0")
@@ -54,23 +45,19 @@ class ProgressDialog(Tk.Toplevel):
         ttk.Label(counts, text="  /  ").pack(side="left")
         ttk.Label(counts, textvariable=self.SkipVar).pack(side="left")
 
-        # 状态（执行中 / 已完成）
         self.StateVar = Tk.StringVar(value=f"执行中… 0/{self._total}")
         ttk.Label(box, textvariable=self.StateVar).pack(anchor="w", pady=(6, 0))
 
-        # 当前项信息
         self.MsgVar = Tk.StringVar(value="")
         ttk.Label(box, textvariable=self.MsgVar, foreground="#444").pack(anchor="w", pady=(2, 0))
 
-        # 单按钮：执行中=中断；完成=关闭
         btns = ttk.Frame(box); btns.pack(fill="x", pady=(pad, 0))
         self.ActionBtn = ttk.Button(btns, text="中断", command=self._on_action)
         self.ActionBtn.pack(anchor="center")
 
-        # 关闭按钮行为（X）
         self.protocol("WM_DELETE_WINDOW", self._on_action)
 
-        # 居中（相对父窗口中心）
+        # 居中到父窗口
         self.update_idletasks()
         try:
             px = master.winfo_rootx(); py = master.winfo_rooty()
@@ -80,7 +67,6 @@ class ProgressDialog(Tk.Toplevel):
         except Exception:
             pass
 
-    # --- 外部 API ---
     def SetOnClosed(self, fn):
         self._on_closed = fn
 
@@ -96,14 +82,11 @@ class ProgressDialog(Tk.Toplevel):
         self.update_idletasks()
 
     def MarkDone(self, ok: int, fail: int, skip: int):
-        """切换为完成态：按钮改“关闭”，允许真正关闭窗口"""
         self._completed = True
         self.Bar["value"] = self.Bar["maximum"]
         self.ActionBtn.configure(text="关闭")
-        # 刷新状态一遍
         self.Update(self._total, ok, fail, skip, "")
 
-    # --- 内部行为 ---
     def _on_action(self):
         if not self._completed:
             try:
@@ -134,10 +117,10 @@ class MainFrame(ttk.Frame):
     """
 
     # 统一纯色，减少纹理/残影
-    HI_BG     = "#e6f2ff"   # 高亮背景
-    NORM_BG   = "#f8f8f8"   # 行容器默认背景
-    SEP_BG    = "#dddddd"   # 分隔线颜色
-    CANVAS_BG = "#ffffff"   # Canvas 背景
+    HI_BG     = "#e6f2ff"
+    NORM_BG   = "#f8f8f8"
+    SEP_BG    = "#dddddd"
+    CANVAS_BG = "#ffffff"
 
     def __init__(self, master):
         super().__init__(master, padding=8)
@@ -145,18 +128,16 @@ class MainFrame(ttk.Frame):
         self.OnRefresh = None
         self.OnApply   = None
 
-        # ===== 定义复选框样式（在 vista/xpnative 下能得到“✔”）=====
+        # 复选框样式
         self._style = ttk.Style()
-        # 行内复选框
         self._style.configure("Row.TCheckbutton", background=self.NORM_BG)
         self._style.map("Row.TCheckbutton",
                         background=[("active", self.NORM_BG), ("selected", self.NORM_BG)])
-        # 顶部“全选(可见)”复选框
         self._style.configure("Head.TCheckbutton", background=self.CANVAS_BG)
         self._style.map("Head.TCheckbutton",
                         background=[("active", self.CANVAS_BG), ("selected", self.CANVAS_BG)])
 
-        # ===== 顶部：Changelist 下拉 + 过滤 =====
+        # 顶部
         top = ttk.Frame(self); top.pack(fill="x", pady=(0,8))
         ttk.Label(top, text="Changelist#:").pack(side="left")
 
@@ -173,7 +154,7 @@ class MainFrame(ttk.Frame):
                         variable=self.OnlyChangedVar,
                         command=self._apply_filter).pack(side="left", padx=(12,0))
 
-        # ===== 列表上方：全选 + 已勾选统计 =====
+        # 头部：全选/统计
         header = ttk.Frame(self); header.pack(fill="x", pady=(8,4))
         self.SelectAllVar = Tk.BooleanVar(value=False)
         self.SelectAllChk = ttk.Checkbutton(
@@ -188,9 +169,8 @@ class MainFrame(ttk.Frame):
         self.CheckedStatLbl = ttk.Label(header, textvariable=self.CheckedStatVar)
         self.CheckedStatLbl.pack(side="right")
 
-        # ===== 中部：列表（可滚动） =====
+        # 列表（滚动）
         mid = ttk.Frame(self); mid.pack(fill="both", expand=True)
-
         self.Canvas = Tk.Canvas(mid, highlightthickness=0, bg=self.CANVAS_BG)
         vbar = ttk.Scrollbar(mid, orient="vertical", command=self.Canvas.yview)
         self.Canvas.configure(yscrollcommand=vbar.set)
@@ -202,47 +182,46 @@ class MainFrame(ttk.Frame):
         self.ListArea.bind("<Configure>", lambda e: self.Canvas.configure(scrollregion=self.Canvas.bbox("all")))
         self.Canvas.bind("<Configure>", self._on_canvas_resize)
 
-        # ===== 底部：应用按钮（居中） =====
+        # 底部按钮
         btnBox = ttk.Frame(self); btnBox.pack(fill="x", pady=(8,0))
         self.ApplyBtn = ttk.Button(btnBox, text="应用修改", command=self._on_apply)
         self.ApplyBtn.pack(anchor="center")
 
-        # ===== 数据状态 =====
-        self._Pairs   = []   # [(src, dstCand), ...]
-        self._Targets = []   # [dst, ...]
-        self._Order   = []   # 排序后的全量索引
-        self._ViewIdx = []   # 可见 -> 全量
-        self._SelVars = []   # 与全量对齐的 BooleanVar（勾选）
-        self._Rows    = {}   # {full_idx: rowFrame}
-        self._ChkRefs = {}   # {full_idx: ttk.Checkbutton}
-        self._SelectedSet = set()   # “高亮选择”的 full_idx 集合
-        self._LastAnchor  = None    # Shift 锚点
-        self._BulkChecking = False  # 批量设置时避免递归
-        self._ProgDlg = None        # 进度窗引用
+        # 数据
+        self._Pairs   = []
+        self._Targets = []
+        self._Order   = []
+        self._ViewIdx = []
+        self._SelVars = []
+        self._Rows    = {}
+        self._ChkRefs = {}
+        self._SelectedSet = set()
+        self._LastAnchor  = None
+        self._BulkChecking = False
+        self._ProgDlg = None
 
-        # 下拉内容
         self._CLItems = []
         self._CLLabelToId = {}
         self._set_cl_items([("default", "default (未提交)")])
         self.CLCombo.set("default (未提交)")
 
-    # ---------- 回调绑定 ----------
+    # 绑定
     def SetOnListChangelists(self, fn): self.OnListChangelists = fn
     def SetOnRefresh(self, fn):         self.OnRefresh = fn
     def SetOnApply(self, fn):           self.OnApply = fn
 
-    # ---------- 对外：渲染 ----------
+    # 渲染
     def RenderPairs(self, pairs, targets):
         self._Pairs   = list(pairs)
         self._Targets = list(targets)
 
-        # 初始化/扩展勾选变量（默认勾选）
+        # 勾选变量（默认勾选）
         n = len(self._Pairs)
         if len(self._SelVars) < n:
             for _ in range(n - len(self._SelVars)):
                 self._SelVars.append(Tk.BooleanVar(value=True))
 
-        # 自动排序：优先更改后文件名，其次更改后完整路径
+        # 排序：优先“更改后”文件名，其次完整路径
         keys = []
         for i, (src, _dstcand) in enumerate(self._Pairs):
             dst  = self._Targets[i] if i < len(self._Targets) else ""
@@ -257,7 +236,7 @@ class MainFrame(ttk.Frame):
         if logs_tail:
             messagebox.showinfo("日志(末尾)", "\n".join(logs_tail[-20:]))
 
-    # ---------- 进度弹窗 API（给 Main 调用） ----------
+    # 进度弹窗 API
     def OpenProgress(self, total: int, stop_event, on_closed=None):
         if self._ProgDlg:
             try: self._ProgDlg.destroy()
@@ -274,7 +253,7 @@ class MainFrame(ttk.Frame):
         if self._ProgDlg:
             self._ProgDlg.MarkDone(ok, fail, skip)
 
-    # ---------- 下拉 ----------
+    # 下拉
     def _set_cl_items(self, items):
         self._CLItems = list(items)
         self._CLLabelToId = {label: id_ for (id_, label) in self._CLItems}
@@ -299,7 +278,7 @@ class MainFrame(ttk.Frame):
         cl_id = self._CLLabelToId.get(label, "default")
         self.OnRefresh(cl_id)
 
-    # ---------- 视图 ----------
+    # 视图
     def _on_canvas_resize(self, evt):
         self.Canvas.itemconfig(self._canvas_item, width=evt.width)
 
@@ -307,7 +286,6 @@ class MainFrame(ttk.Frame):
         self._refresh_view()
 
     def _refresh_view(self):
-        # 清空旧行/选择
         for w in self._Rows.values():
             try: w.destroy()
             except Exception: pass
@@ -333,7 +311,6 @@ class MainFrame(ttk.Frame):
         row = Tk.Frame(self.ListArea, bg=self.NORM_BG, padx=6, pady=6)
         row.pack(fill="x", expand=True)
 
-        # 行内复选：ttk.Checkbutton（配合 Main.py 的 vista/xpnative 主题显示“✔”）
         chk = ttk.Checkbutton(
             row, variable=self._SelVars[idx],
             command=lambda i=idx: self._on_check_toggle(i),
@@ -347,21 +324,17 @@ class MainFrame(ttk.Frame):
         t1.grid(row=0, column=1, sticky="w")
         t2.grid(row=1, column=1, sticky="w")
 
-        # 选择（高亮）
         for w in (row, t1, t2, chk):
             w.bind("<Button-1>", lambda e, i=idx: self._on_row_select(i, e))
 
-        # 双击“更改后”允许编辑目标路径（屏幕居中）
         t2.bind("<Double-Button-1>", lambda e, i=idx: self._edit_target(i))
 
-        # 纯色分隔线（避免 ttk.Separator 的主题纹理）
         sep = Tk.Frame(self.ListArea, height=1, bg=self.SEP_BG, bd=0, highlightthickness=0)
         sep.pack(fill="x")
 
         self._Rows[idx] = row
 
     def _edit_target(self, idx):
-        """编辑更改后路径（弹窗屏幕居中）"""
         old = self._Targets[idx]
         win = Tk.Toplevel(self)
         win.title("编辑目标路径")
@@ -377,7 +350,6 @@ class MainFrame(ttk.Frame):
         win.transient(self.winfo_toplevel())
         win.update_idletasks()
         try:
-            # 居中到屏幕中央
             w = win.winfo_width(); h = win.winfo_height()
             sw = win.winfo_screenwidth(); sh = win.winfo_screenheight()
             x = (sw - w) // 2; y = (sh - h) // 2
@@ -387,7 +359,7 @@ class MainFrame(ttk.Frame):
         win.grab_set()
         win.wait_window()
 
-    # ---------- 选择（仅高亮） ----------
+    # 选择（仅高亮）
     def _on_row_select(self, idx, event):
         shift = bool(event.state & 0x0001)
         ctrl  = bool(event.state & 0x0004)
@@ -435,7 +407,6 @@ class MainFrame(ttk.Frame):
         row.configure(bg=bg)
         for child in row.winfo_children():
             try:
-                # Tk.Label / Tk.Frame 改背景；ttk.Checkbutton 用 style，不改背景
                 if isinstance(child, (Tk.Label, Tk.Frame)):
                     if isinstance(child, Tk.Frame) and child.cget("height") == 1:
                         continue
@@ -443,7 +414,7 @@ class MainFrame(ttk.Frame):
             except Exception:
                 pass
 
-    # ---------- 勾选逻辑 ----------
+    # 勾选
     def _on_check_toggle(self, idx):
         new_state = self._SelVars[idx].get()
 
@@ -491,7 +462,7 @@ class MainFrame(ttk.Frame):
             self._BulkChecking = False
         self._update_checked_stat()
 
-    # ---------- 应用 ----------
+    # 应用
     def _on_apply(self):
         if not callable(self.OnApply):
             messagebox.showerror("错误", "未绑定 OnApply 回调。"); return
