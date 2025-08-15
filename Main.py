@@ -16,10 +16,10 @@ InjectSysPath()
 from LoginUI import LoginFrame
 from MainUI import MainFrame
 from Core import (
-    P4Context, GetOpenedPairs, NormalizeName,
+    P4Context, GetOpenedPairs,
     TrySingleMove, TryTwoMoves,
     GetCachedP4User, SaveCachedP4User,
-    GetPendingChangelists,   # << 新增导入
+    GetPendingChangelists,
 )
 
 def NeedsPassword(msg: str) -> bool:
@@ -53,13 +53,12 @@ def Main():
         f = MainFrame(root)
         current["frame"] = f
         f.pack(fill="both", expand=True)
-        f.SetOnListChangelists(on_list_changelists)  # << 提供下拉获取列表
-        f.SetOnRefresh(on_refresh)                   # << 选择后自动刷新
+        f.SetOnListChangelists(on_list_changelists)
+        f.SetOnRefresh(on_refresh)
         f.SetOnApply(on_apply)
-        # 默认载入 default（给出一个即时视图）
-        on_refresh("default")
+        on_refresh("default")  # 默认载入
 
-    # ---- UI 更新便捷函数 ----
+    # ---- UI 便捷 ----
     def render_pairs(pairs, targets):
         f = current["frame"]
         if isinstance(f, MainFrame):
@@ -69,6 +68,18 @@ def Main():
         f = current["frame"]
         if isinstance(f, MainFrame):
             f.ShowResult(ok_count, fail_count, logs_tail)
+
+    def start_progress(total):
+        f = current["frame"]
+        if isinstance(f, MainFrame): f.StartProgress(total)
+
+    def update_progress(done, total, msg=""):
+        f = current["frame"]
+        if isinstance(f, MainFrame): f.UpdateProgress(done, total, msg)
+
+    def end_progress():
+        f = current["frame"]
+        if isinstance(f, MainFrame): f.EndProgress()
 
     def show_error(msg):
         messagebox.showerror("错误", msg)
@@ -95,47 +106,59 @@ def Main():
         show_main()
 
     def on_list_changelists():
-        """提供给 MainUI：返回 [(id, label)]，每次展开下拉都会调用"""
         if not ctx["P4"]:
             return [("default", "default (未提交)")]
         return GetPendingChangelists(ctx["P4"], Max=50)
 
     def on_refresh(changelist: str):
         if not ctx["P4"]:
-            show_error("尚未连接 P4。")
-            return
+            show_error("尚未连接 P4。"); return
         ok, pairs, targets, msg = GetOpenedPairs(ctx["P4"], changelist)
         if not ok:
-            show_error(msg or "获取 Opened 列表失败")
-            return
+            show_error(msg or "获取 Opened 列表失败"); return
         render_pairs(pairs, targets)
 
     def on_apply(indices, pairs, targets):
         if not ctx["P4"]:
-            show_error("尚未连接 P4。")
-            return
+            show_error("尚未连接 P4。"); return
+
+        total = len(indices)
+        if total == 0:
+            messagebox.showinfo("提示", "没有需要应用的项。"); return
+
         ok_count = 0
         fail_count = 0
         logs = []
-        for idx in indices:
+
+        start_progress(total)
+        for i, idx in enumerate(indices, start=1):
             try:
                 src = pairs[idx][0]
                 dst = targets[idx]
                 if not dst or src == dst:
+                    update_progress(i, total, "跳过无变化")
                     continue
+
+                stepMsg = f"{src} -> {dst}"
+                # 单步尝试
                 if TrySingleMove(ctx["P4"], src, dst):
                     ok_count += 1
                     logs.append(f"[OK] move {src} -> {dst}")
+                    update_progress(i, total, stepMsg)
                     continue
+                # 双步
                 if TryTwoMoves(ctx["P4"], src, dst):
                     ok_count += 1
                     logs.append(f"[OK] move*2 {src} -> {dst}")
                 else:
                     fail_count += 1
                     logs.append(f"[FAIL] move {src} -> {dst}")
+                update_progress(i, total, stepMsg)
             except Exception as e:
                 fail_count += 1
                 logs.append(f"[EXCEPT] idx={idx} err={e!r}")
+                update_progress(i, total, f"异常：{e!r}")
+        end_progress()
         show_result(ok_count, fail_count, logs[-50:])
 
     show_login()
