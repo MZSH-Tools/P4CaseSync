@@ -33,7 +33,7 @@ def Main():
     root = Tk.Tk()
     root.title("P4 SubmitList Tool")
 
-    # === 新增：窗口居中 ===
+    # === 窗口居中 ===
     root.update_idletasks()
     w = root.winfo_width()
     h = root.winfo_height()
@@ -45,6 +45,8 @@ def Main():
     # === 居中结束 ===
 
     current = {"frame": None}
+    # 记录当前选中的 changelist id（用于一致性检测时过滤 opened）
+    state = {"current_cl": "default"}
 
     def ui(fn, *a, **kw):
         """把 UI 更新投递到主线程"""
@@ -127,6 +129,8 @@ def Main():
     def on_refresh(changelist: str):
         if not ctx["P4"]:
             show_error("尚未连接 P4。"); return
+        # 记录当前 cl，用于后续一致性检测
+        state["current_cl"] = (changelist or "default")
         ok, pairs, targets, msg = GetOpenedPairs(ctx["P4"], changelist)
         if not ok:
             show_error(msg or "获取 Opened 列表失败"); return
@@ -158,6 +162,29 @@ def Main():
         # 打开进度窗（主线程）
         open_progress(total, stop_event=stop_evt, on_closed=after_progress_closed)
 
+        # === 一致性检测工具 ===
+        def _opened_paths_in_current_cl():
+            """返回当前 CL 下的已打开 depot 路径列表（字符串精确值）"""
+            ok2, p2, _t2, _ = GetOpenedPairs(ctx["P4"], state["current_cl"])
+            if not ok2:
+                return []
+            return [src for (src, _dstcand) in p2]
+
+        def _is_exact_match(dst: str) -> bool:
+            """是否已存在与 dst 完全一致（大小写也一致）的 opened 路径"""
+            return any(p == dst for p in _opened_paths_in_current_cl())
+
+        def _find_casefold_match(dst: str):
+            """
+            在当前 CL 的 opened 中，找到与 dst 大小写不敏感相等的“实际路径”，
+            用于在方法1后定位真实源（若大小写仍不符，需要从实际路径做方法2）。
+            """
+            dlow = (dst or "").casefold()
+            for p in _opened_paths_in_current_cl():
+                if p.casefold() == dlow:
+                    return p
+            return None
+
         def worker():
             nonlocal ok_count, fail_count, skip_count
             for i, idx in enumerate(indices, start=1):
@@ -165,8 +192,8 @@ def Main():
                     logs.append("[INTERRUPT] 用户中断")
                     break
                 try:
-                    src = pairs[idx][0]
-                    dst = targets[idx]
+                    src = pairs[idx][0]   # 原始 depot 路径
+                    dst = targets[idx]    # 期望目标路径（大小写已规范化）
                     if not dst or src == dst:
                         skip_count += 1
                         ui(update_progress, i, ok_count, fail_count, skip_count, "跳过无变化")
@@ -174,20 +201,49 @@ def Main():
 
                     step_msg = f"{src} → {dst}"
 
-                    # 单步尝试
+                    # ---------- 方法1：单步移动 ----------
+                    moved = False
                     if TrySingleMove(ctx["P4"], src, dst):
-                        ok_count += 1
-                        logs.append(f"[OK] move {src} -> {dst}")
-                        ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
-                        continue
+                        # 执行后立刻做一致性检测（必须完全相等）
+                        if _is_exact_match(dst):
+                            moved = True
+                            ok_count += 1
+                            logs.append(f"[OK] move {src} -> {dst}")
+                            ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                            continue
+                        else:
+                            # 方法1执行了，但大小写等细节不一致，需要通过方法2再修正
+                            current_path = _find_casefold_match(dst)
+                            if not current_path:
+                                # 找不到当前实际项，无法继续纠正
+                                fail_count += 1
+                                logs.append(f"[FAIL] move(after-1st-move not matched & not found) {src} -> {dst}")
+                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                                continue
+                            # 用实际路径执行方法2
+                            if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
+                                moved = True
+                                ok_count += 1
+                                logs.append(f"[OK] move*2(fix-after-1st) {current_path} -> {dst}")
+                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                                continue
+                            else:
+                                fail_count += 1
+                                logs.append(f"[FAIL] move*2(fix-after-1st) {current_path} -> {dst}")
+                                ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
+                                continue
 
-                    # 双步
-                    if TryTwoMoves(ctx["P4"], src, dst):
+                    # ---------- 方法2：双步移动（直接尝试） ----------
+                    # 方法1未成功执行（或直接失败），尝试方法2从“当前实际路径”出发更稳妥：
+                    # 若前面未移动过，则 current_path 仍应等于 src；若移动过失败就按大小写不敏感去找。
+                    current_path = _find_casefold_match(dst) or src
+                    if TryTwoMoves(ctx["P4"], current_path, dst) and _is_exact_match(dst):
+                        moved = True
                         ok_count += 1
-                        logs.append(f"[OK] move*2 {src} -> {dst}")
+                        logs.append(f"[OK] move*2 {current_path} -> {dst}")
                     else:
                         fail_count += 1
-                        logs.append(f"[FAIL] move {src} -> {dst}")
+                        logs.append(f"[FAIL] move {current_path} -> {dst}")
 
                     ui(update_progress, i, ok_count, fail_count, skip_count, step_msg)
 
