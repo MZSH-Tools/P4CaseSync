@@ -2,9 +2,16 @@
 
 block_cipher = None
 
+import os
+spec_root = os.path.abspath(SPECPATH)
+
 a = Analysis(
     ['Main.py'],
-    pathex=[],
+    pathex=[
+        spec_root,
+        os.path.join(spec_root, 'Source', 'UI'),
+        os.path.join(spec_root, 'Source', 'Logic'),
+    ],
     binaries=[],
     datas=[],
     hiddenimports=[
